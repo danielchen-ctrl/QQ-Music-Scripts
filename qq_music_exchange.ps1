@@ -145,8 +145,8 @@ $Timing = @{
 
 $FastTiming = @{
     InitialSettleMs          = 100
-    RechargeToServiceMs      = 260
-    ServiceToPopupMs         = 220
+    RechargeToServiceMs      = 600
+    ServiceToPopupMs         = 400
     PreBurstSettleMs         = 40
     QuickCheckBudgetMs       = 420
     QuickPollMs              = 60
@@ -175,8 +175,8 @@ $KnownFastDeviceProfiles = @(
             PopupExchange   = @{ X = 838; Y = 1711 }
         }
         Delays       = @{
-            RechargeToServiceTapDelayMs = 260
-            ServiceToPopupTapDelayMs    = 220
+            RechargeToServiceTapDelayMs = 600
+            ServiceToPopupTapDelayMs    = 400
             PreBurstSettleMs            = 40
         }
     }
