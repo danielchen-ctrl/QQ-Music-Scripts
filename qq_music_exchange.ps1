@@ -1719,37 +1719,104 @@ function Resolve-TapPointFromSnapshot {
     return $null
 }
 
+function Build-TurboSequenceCommand {
+    param(
+        [pscustomobject]$RechargePoint,
+        [pscustomobject]$ServicePoint,
+        [int]$RechargeDelayMs,
+        [int]$PopupDelayMs,
+        [int]$PreBurstDelayMs,
+        [pscustomobject]$PlusPoint,
+        [pscustomobject]$ExchangePoint
+    )
+
+    $sleepRecharge = Get-ShellSecondsText -Milliseconds $RechargeDelayMs
+    $sleepPopup    = Get-ShellSecondsText -Milliseconds $PopupDelayMs
+
+    $exchangeCommand = if ($BurstOnly) { ':' } else {
+        'cmd input tap {0} {1}' -f $ExchangePoint.X, $ExchangePoint.Y
+    }
+
+    $burstSegment = if ($PlusTapCount -gt 0) {
+        'count=0; while [ $count -lt {0} ]; do cmd input tap {1} {2}; count=$((count+1)); done' -f `
+            $PlusTapCount, $PlusPoint.X, $PlusPoint.Y
+    } else { ':' }
+
+    $segments = [System.Collections.Generic.List[string]]::new()
+    $segments.Add('tapStart=$(date +%s%3N)')
+    $segments.Add(('cmd input tap {0} {1}' -f $RechargePoint.X, $RechargePoint.Y))
+    $segments.Add(('sleep {0}' -f $sleepRecharge))
+    $segments.Add('serviceAt=$(date +%s%3N)')
+    $segments.Add(('cmd input tap {0} {1}' -f $ServicePoint.X, $ServicePoint.Y))
+    $segments.Add(('sleep {0}' -f $sleepPopup))
+    if ($PreBurstDelayMs -gt 0) {
+        $segments.Add(('sleep {0}' -f (Get-ShellSecondsText -Milliseconds $PreBurstDelayMs)))
+    }
+    $segments.Add('popupAt=$(date +%s%3N)')
+    $segments.Add($burstSegment)
+    $segments.Add('plusEnd=$(date +%s%3N)')
+    $segments.Add($exchangeCommand)
+    $segments.Add('end=$(date +%s%3N)')
+    $segments.Add('echo "$tapStart $serviceAt $popupAt $plusEnd $end"')
+
+    return ($segments -join '; ')
+}
+
 function Run-ExchangeFlowFast {
     param([pscustomobject]$RechargePoint)
 
     $overallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $rechargeDelayMs = Get-ConfiguredDelayMs -DelayName "RechargeToServiceTapDelayMs" -DefaultValue $FastTiming.RechargeToServiceMs -OverrideValue $RechargeToServiceTapDelayMs
-    $popupDelayMs = Get-ConfiguredDelayMs -DelayName "ServiceToPopupTapDelayMs" -DefaultValue $FastTiming.ServiceToPopupMs -OverrideValue $ServiceToPopupTapDelayMs
-    $preBurstDelayMs = Get-ConfiguredDelayMs -DelayName "PreBurstSettleMs" -DefaultValue $FastTiming.PreBurstSettleMs -OverrideValue $PreBurstSettleMs
+    $popupDelayMs    = Get-ConfiguredDelayMs -DelayName "ServiceToPopupTapDelayMs"    -DefaultValue $FastTiming.ServiceToPopupMs    -OverrideValue $ServiceToPopupTapDelayMs
+    $preBurstDelayMs = Get-ConfiguredDelayMs -DelayName "PreBurstSettleMs"            -DefaultValue $FastTiming.PreBurstSettleMs    -OverrideValue $PreBurstSettleMs
 
     $rechargeExecutionPoint = Get-StaticTapPoint -ActionName "RechargeCard" -FallbackPoint $RechargePoint
-    $rechargeStage = [System.Diagnostics.Stopwatch]::StartNew()
-    Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
-    Start-Sleep -Milliseconds $rechargeDelayMs
-    Write-StageDuration -StageName "Execution stage RechargeCard -> ServiceExchange ready" -Stopwatch $rechargeStage
+    $servicePoint           = Get-StaticTapPoint -ActionName "ServiceExchange"
+    $popupExchangePoint     = Get-StaticTapPoint -ActionName "PopupExchange"
+    $popupPlusPoint         = Get-StaticTapPoint -ActionName "PopupPlus" -FallbackPoint (Get-ScaledTapPoint -ActionName "PopupPlus" -AnchorPoint $popupExchangePoint)
 
-    $serviceStage = [System.Diagnostics.Stopwatch]::StartNew()
-    $servicePoint = Get-StaticTapPoint -ActionName "ServiceExchange"
-    Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
-    Start-Sleep -Milliseconds $popupDelayMs
+    Write-Log ("TurboMode tap points: RechargeCard ({0},{1}) via {2}; ServiceExchange ({3},{4}) via {5}." -f `
+        $rechargeExecutionPoint.X, $rechargeExecutionPoint.Y, $rechargeExecutionPoint.Source, `
+        $servicePoint.X, $servicePoint.Y, $servicePoint.Source)
+    Write-Log ("TurboMode popup points: PopupExchange via {0}; PopupPlus via {1}." -f `
+        $popupExchangePoint.Source, $popupPlusPoint.Source)
 
-    $popupExchangePoint = Get-StaticTapPoint -ActionName "PopupExchange"
-    $popupPlusPoint = Get-StaticTapPoint -ActionName "PopupPlus" -FallbackPoint (Get-ScaledTapPoint -ActionName "PopupPlus" -AnchorPoint $popupExchangePoint)
-
-    Write-Log ("TurboMode popup points: PopupExchange via {0}; PopupPlus via {1}." -f $popupExchangePoint.Source, $popupPlusPoint.Source)
-    Write-StageDuration -StageName "Execution stage ServiceExchange -> Popup ready" -Stopwatch $serviceStage
-
-    $burstStage = [System.Diagnostics.Stopwatch]::StartNew()
-    if ($preBurstDelayMs -gt 0) {
-        Start-Sleep -Milliseconds $preBurstDelayMs
+    if ($DryRun) {
+        Write-Log "DryRun: full turbo sequence skipped."
+        Write-StageDuration -StageName "Final total duration" -Stopwatch $overallStopwatch
+        Write-Log "TurboMode path completed."
+        return
     }
-    Run-PopupBurst -PlusPoint $popupPlusPoint -ExchangePoint $popupExchangePoint
-    Write-StageDuration -StageName "Execution stage Popup burst -> Exchange tap" -Stopwatch $burstStage
+
+    $actionText = if ($BurstOnly) { "without the final exchange tap" } else { "and then tapping PopupExchange" }
+    Write-Log ("Running full turbo sequence to {0} lebi with {1} plus tap(s) {2}." -f $TargetLeBi, $PlusTapCount, $actionText)
+
+    $shellCmd = Build-TurboSequenceCommand `
+        -RechargePoint   $rechargeExecutionPoint `
+        -ServicePoint    $servicePoint `
+        -RechargeDelayMs $rechargeDelayMs `
+        -PopupDelayMs    $popupDelayMs `
+        -PreBurstDelayMs $preBurstDelayMs `
+        -PlusPoint       $popupPlusPoint `
+        -ExchangePoint   $popupExchangePoint
+
+    $raw = (Invoke-DeviceShell -Command $shellCmd).Trim()
+
+    if ($raw -match '(\d{13})\s+(\d{13})\s+(\d{13})\s+(\d{13})\s+(\d{13})') {
+        $tapStartMs  = [int64]$matches[1]
+        $serviceAtMs = [int64]$matches[2]
+        $popupAtMs   = [int64]$matches[3]
+        $plusEndMs   = [int64]$matches[4]
+        $endMs       = [int64]$matches[5]
+
+        Write-Log ("Device-side RechargeCard -> ServiceExchange delay: {0} ms" -f ($serviceAtMs - $tapStartMs))
+        Write-Log ("Device-side ServiceExchange -> Popup burst start: {0} ms"  -f ($popupAtMs   - $serviceAtMs))
+        Write-Log ("Device-side burst +{0} taps: {1} ms"                       -f $PlusTapCount, ($plusEndMs - $popupAtMs))
+        Write-Log ("Device-side full sequence: {0} ms"                         -f ($endMs - $tapStartMs))
+    } elseif (-not [string]::IsNullOrWhiteSpace($raw)) {
+        Write-Log "Turbo sequence raw output: $raw"
+    }
+
     Write-StageDuration -StageName "Final total duration" -Stopwatch $overallStopwatch
     Write-Log "TurboMode path completed."
 }
