@@ -11,6 +11,7 @@
     [switch]$DryRun,
     [switch]$PreflightOnly,
     [switch]$RehearsalOnly,
+    [switch]$Calibrate,
     [switch]$ListDevicesJson,
     [string]$ArtifactRoot,
     [int]$RechargeToServiceTapDelayMs = 0,
@@ -826,6 +827,44 @@ function Save-RehearsalCache {
     Save-JsonFile -Path $path -Value $payload
     $script:RehearsalCache = Load-RehearsalCache
     Write-Log "Rehearsal capture completed."
+}
+
+function Save-CalibrationProfile {
+    param(
+        [pscustomobject]$RechargePoint,
+        [pscustomobject]$ServicePoint,
+        [pscustomobject]$PopupPlusPoint,
+        [pscustomobject]$PopupExchangePoint,
+        [pscustomobject]$PopupMinusPoint,
+        [pscustomobject]$PopupCancelPoint,
+        [int]$MeasuredRechargeDelayMs,
+        [int]$MeasuredPopupDelayMs
+    )
+
+    $path = Get-CalibrationPath
+    $safetyMarginMs = 80
+
+    $payload = [ordered]@{
+        DeviceId        = $script:DeviceId
+        DeviceSignature = Get-DeviceSignature
+        SavedAt         = (Get-Date).ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
+        Points          = [ordered]@{
+            RechargeCard    = Convert-TapPointForStorage -Point $RechargePoint
+            ServiceExchange = Convert-TapPointForStorage -Point $ServicePoint
+            PopupPlus       = Convert-TapPointForStorage -Point $PopupPlusPoint
+            PopupExchange   = Convert-TapPointForStorage -Point $PopupExchangePoint
+            PopupMinus      = Convert-TapPointForStorage -Point $PopupMinusPoint
+            PopupCancel     = Convert-TapPointForStorage -Point $PopupCancelPoint
+        }
+        Delays          = [ordered]@{
+            RechargeToServiceTapDelayMs = [Math]::Max(100, $MeasuredRechargeDelayMs + $safetyMarginMs)
+            ServiceToPopupTapDelayMs    = [Math]::Max(100, $MeasuredPopupDelayMs + $safetyMarginMs)
+            PreBurstSettleMs            = $FastTiming.PreBurstSettleMs
+        }
+    }
+
+    Save-JsonFile -Path $path -Value $payload
+    Write-Log ("Calibration profile saved to: {0}" -f $path)
 }
 
 function Get-CurrentDeviceTime {
@@ -2104,6 +2143,98 @@ function Run-RehearsalFlow {
     return $returnRechargePoint
 }
 
+function Run-CalibrateFlow {
+    param([pscustomobject]$RechargePoint)
+
+    Write-Log "=== 设备校准开始 ==="
+    Write-Log ("设备: {0} {1} | 分辨率: {2} | 密度: {3}" -f `
+        $script:DeviceProfile.Manufacturer, $script:DeviceProfile.Model, `
+        $script:DeviceProfile.Resolution, $script:DeviceProfile.Density)
+
+    # Step 1: 重新从屏幕获取 RechargeCard 位置
+    Write-Log "正在从当前屏幕获取乐币充值入口位置..."
+    $rechargeExecutionPoint = Resolve-TapPoint -ActionName "RechargeCard" -ForceRefresh -AllowFallback
+    if (-not $rechargeExecutionPoint) {
+        throw "找不到乐币充值按钮，请确认已停留在 QQ 音乐乐币搜索结果页。"
+    }
+    Write-Log ("RechargeCard: ({0},{1}) via {2}" -f `
+        $rechargeExecutionPoint.X, $rechargeExecutionPoint.Y, $rechargeExecutionPoint.Source)
+
+    # Step 2: 点击 RechargeCard，等待服务页出现并测量延迟
+    Write-Log "正在点击乐币充值入口，等待服务页加载..."
+    $rechargeDelaySw = [System.Diagnostics.Stopwatch]::StartNew()
+    Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
+
+    $servicePoint = Wait-ForTapPoint -ActionName "ServiceExchange" -TimeoutMs 4000 -PollMs 80 -AllowFallback
+    if (-not $servicePoint) {
+        throw "服务页未出现，请检查 QQ 音乐是否响应正常。"
+    }
+    $measuredRechargeDelayMs = [int]$rechargeDelaySw.ElapsedMilliseconds
+    Write-Log ("ServiceExchange: ({0},{1}) via {2} — 延迟 {3} ms" -f `
+        $servicePoint.X, $servicePoint.Y, $servicePoint.Source, $measuredRechargeDelayMs)
+
+    # Step 3: 点击 ServiceExchange，等待弹框出现并测量延迟
+    Write-Log "正在点击服务兑换，等待弹框出现..."
+    $popupDelaySw = [System.Diagnostics.Stopwatch]::StartNew()
+    Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
+
+    $popupExchangePoint = Wait-ForTapPoint -ActionName "PopupExchange" -TimeoutMs 4000 -PollMs 80 -AllowFallback
+    if (-not $popupExchangePoint) {
+        throw "兑换弹框未出现，ServiceExchange 坐标可能不准确。"
+    }
+    $measuredPopupDelayMs = [int]$popupDelaySw.ElapsedMilliseconds
+    Write-Log ("PopupExchange: ({0},{1}) via {2} — 延迟 {3} ms" -f `
+        $popupExchangePoint.X, $popupExchangePoint.Y, $popupExchangePoint.Source, $measuredPopupDelayMs)
+
+    # Step 4: 捕获弹框内所有按钮坐标
+    Write-Log "正在捕获弹框内所有按钮坐标..."
+    $snapshot = Get-UiSnapshot -ForceRefresh
+    $popupPlusPoint   = Resolve-TapPointFromSnapshot -ActionName "PopupPlus"   -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
+    $popupMinusPoint  = Resolve-TapPointFromSnapshot -ActionName "PopupMinus"  -Snapshot $snapshot -AllowFallback
+    $popupCancelPoint = Resolve-TapPointFromSnapshot -ActionName "PopupCancel" -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
+
+    foreach ($item in @(
+        @{ Name = "PopupPlus";    Point = $popupPlusPoint   },
+        @{ Name = "PopupMinus";   Point = $popupMinusPoint  },
+        @{ Name = "PopupCancel";  Point = $popupCancelPoint }
+    )) {
+        if ($item.Point) {
+            Write-Log ("{0}: ({1},{2}) via {3}" -f $item.Name, $item.Point.X, $item.Point.Y, $item.Point.Source)
+        } else {
+            Write-Log ("{0}: 未找到（将在执行时使用缩放坐标）" -f $item.Name)
+        }
+    }
+
+    # Step 5: 回滚（关闭弹框），返回初始页
+    Write-Log "正在关闭弹框，返回初始页..."
+    if ($popupMinusPoint) {
+        Invoke-TapAction -ActionName "PopupMinus" -Point $popupMinusPoint
+    } elseif ($popupCancelPoint) {
+        Invoke-TapAction -ActionName "PopupCancel" -Point $popupCancelPoint
+    } else {
+        Invoke-DeviceBack
+    }
+    Start-Sleep -Milliseconds $Rehearsal.ReturnSettleMs
+    [void](Return-ToManualStartPage)
+
+    # Step 6: 保存校准数据（永久，不过期）
+    Save-CalibrationProfile `
+        -RechargePoint      $rechargeExecutionPoint `
+        -ServicePoint       $servicePoint `
+        -PopupPlusPoint     $popupPlusPoint `
+        -PopupExchangePoint $popupExchangePoint `
+        -PopupMinusPoint    $popupMinusPoint `
+        -PopupCancelPoint   $popupCancelPoint `
+        -MeasuredRechargeDelayMs $measuredRechargeDelayMs `
+        -MeasuredPopupDelayMs    $measuredPopupDelayMs
+
+    Write-Log "=== 校准完成 ==="
+    Write-Log ("最优延迟: 充值->服务页 {0}ms，服务页->弹框 {1}ms（已加 80ms 安全余量）" -f `
+        ([Math]::Max(100, $measuredRechargeDelayMs + 80)), `
+        ([Math]::Max(100, $measuredPopupDelayMs + 80)))
+    Write-Log "校准数据已永久保存，后续所有执行将自动使用此设备的坐标与延迟。"
+}
+
 function Try-Prime-RehearsalCache {
     param([pscustomobject]$RechargePoint)
 
@@ -2357,6 +2488,12 @@ function Run-ExchangeFlow {
     if ($RehearsalOnly) {
         [void](Run-RehearsalFlow -RechargePoint $rechargePoint)
         Write-Log "RehearsalOnly is on. Ending after rehearsal capture."
+        return
+    }
+
+    if ($Calibrate) {
+        Run-CalibrateFlow -RechargePoint $rechargePoint
+        Write-Log "Calibration completed successfully."
         return
     }
 

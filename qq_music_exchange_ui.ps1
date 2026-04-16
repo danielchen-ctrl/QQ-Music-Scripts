@@ -19,6 +19,7 @@ $script:DefaultTargetLeBi = 330
 $script:DefaultTargetTimeText = "12:00:00"
 $script:CurrentProcess = $null
 $script:CurrentRunIsPreflight = $false
+$script:CurrentRunIsCalibrate = $false
 $script:StdoutPath = $null
 $script:StderrPath = $null
 $script:StdoutOffset = 0L
@@ -116,8 +117,8 @@ function Cleanup-RedirectFiles {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "QQ Music Exchange Console"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(940, 680)
-$form.MinimumSize = New-Object System.Drawing.Size(940, 680)
+$form.Size = New-Object System.Drawing.Size(940, 720)
+$form.MinimumSize = New-Object System.Drawing.Size(940, 720)
 $form.BackColor = $script:Palette.WindowBack
 $form.ForeColor = $script:Palette.Ink
 
@@ -156,7 +157,7 @@ $headerPanel.Controls.Add($chipLabel)
 
 $configCard = New-Object System.Windows.Forms.Panel
 $configCard.Location = New-Object System.Drawing.Point(24, 126)
-$configCard.Size = New-Object System.Drawing.Size(892, 224)
+$configCard.Size = New-Object System.Drawing.Size(892, 264)
 $configCard.Anchor = "Top,Left,Right"
 $configCard.BackColor = $script:Palette.CardBack
 $configCard.BorderStyle = "FixedSingle"
@@ -309,8 +310,20 @@ $preflightButton.FlatAppearance.BorderSize = 1
 $configCard.Controls.Add($preflightButton)
 [void]$toolTip.SetToolTip($preflightButton, "Verify the current page is already on QQ Music '乐币' search results and the RechargeCard can be resolved, without sending taps.")
 
+$calibrateButton = New-Object System.Windows.Forms.Button
+$calibrateButton.Location = New-Object System.Drawing.Point(734, 192)
+$calibrateButton.Size = New-Object System.Drawing.Size(126, 48)
+$calibrateButton.Text = "校准设备"
+$calibrateButton.Font = New-UiFont -Name "Segoe UI Semibold" -Size 10
+$calibrateButton.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2E6DA4")
+$calibrateButton.ForeColor = [System.Drawing.Color]::White
+$calibrateButton.FlatStyle = "Flat"
+$calibrateButton.FlatAppearance.BorderSize = 0
+$configCard.Controls.Add($calibrateButton)
+[void]$toolTip.SetToolTip($calibrateButton, "新设备首次使用时点击：自动导航各页面，捕获当前手机的精确坐标，无需时间限制，完成后数据永久保存供后续执行使用。")
+
 $logCard = New-Object System.Windows.Forms.Panel
-$logCard.Location = New-Object System.Drawing.Point(24, 372)
+$logCard.Location = New-Object System.Drawing.Point(24, 412)
 $logCard.Size = New-Object System.Drawing.Size(892, 250)
 $logCard.Anchor = "Top,Bottom,Left,Right"
 $logCard.BackColor = $script:Palette.CardBack
@@ -433,6 +446,7 @@ function Set-UiRunningState {
     $refreshDevicesButton.Enabled = -not $IsRunning
     $startButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
     $preflightButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
+    $calibrateButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
 }
 
 function Update-CountdownDisplay {
@@ -580,12 +594,17 @@ function Finish-Run {
     Update-CountdownDisplay
 
     if ($exitCode -eq 0) {
-        $statusLabel.Text = if ($script:CurrentRunIsPreflight) { "Checked" } else { "Done" }
-        $statusLabel.ForeColor = $script:Palette.Success
-        if ($script:CurrentRunIsPreflight) {
+        if ($script:CurrentRunIsCalibrate) {
+            $statusLabel.Text = "Calibrated"
+            $statusLabel.ForeColor = $script:Palette.Success
+            Add-LogLine -Text ("[UI] 设备校准完成 at {0}。后续执行将自动使用此设备的坐标。" -f (Get-Date -Format "HH:mm:ss")) -Color $script:Palette.Success
+        } elseif ($script:CurrentRunIsPreflight) {
+            $statusLabel.Text = "Checked"
+            $statusLabel.ForeColor = $script:Palette.Success
             Add-LogLine -Text ("[UI] Run check completed successfully at {0}." -f (Get-Date -Format "HH:mm:ss")) -Color $script:Palette.Success
-        }
-        else {
+        } else {
+            $statusLabel.Text = "Done"
+            $statusLabel.ForeColor = $script:Palette.Success
             Add-LogLine -Text ("[UI] Script finished successfully at {0}." -f (Get-Date -Format "HH:mm:ss")) -Color $script:Palette.Success
         }
     }
@@ -597,19 +616,20 @@ function Finish-Run {
 
     Cleanup-RedirectFiles
     $script:CurrentRunIsPreflight = $false
+    $script:CurrentRunIsCalibrate = $false
 }
 
 function Start-Run {
-    param([switch]$PreflightOnly)
+    param(
+        [switch]$PreflightOnly,
+        [switch]$Calibrate
+    )
 
     if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
         return
     }
 
-    $targetLeBi = [int]$targetInput.Value
-    $targetTimeText = $timeInput.Text.Trim()
     $deviceId = Get-SelectedDeviceId
-
     if ([string]::IsNullOrWhiteSpace($deviceId)) {
         [void][System.Windows.Forms.MessageBox]::Show(
             "Please refresh and choose one connected Android device first.",
@@ -620,30 +640,40 @@ function Start-Run {
         return
     }
 
-    try {
-        [void][TimeSpan]::ParseExact(
-            $targetTimeText,
-            "hh\:mm\:ss",
-            [System.Globalization.CultureInfo]::InvariantCulture
-        )
-    }
-    catch {
-        [void][System.Windows.Forms.MessageBox]::Show(
-            "Time must use HH:mm:ss, for example 12:00:00.",
-            "Invalid Time",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        $timeInput.Focus()
-        return
+    $targetLeBi    = [int]$targetInput.Value
+    $targetTimeText = if ($Calibrate) { "00:00:00" } else { $timeInput.Text.Trim() }
+
+    if (-not $Calibrate) {
+        try {
+            [void][TimeSpan]::ParseExact(
+                $targetTimeText,
+                "hh\:mm\:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        catch {
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "Time must use HH:mm:ss, for example 12:00:00.",
+                "Invalid Time",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            $timeInput.Focus()
+            return
+        }
     }
 
     Cleanup-RedirectFiles
     $script:StdoutPath = Join-Path $env:TEMP ("qq_music_exchange_stdout_{0}.log" -f ([guid]::NewGuid().ToString("N")))
     $script:StderrPath = Join-Path $env:TEMP ("qq_music_exchange_stderr_{0}.log" -f ([guid]::NewGuid().ToString("N")))
 
-    Add-LogLine -Text ("[UI] Start request: device={0}, target={1}, executeAt={2}, preflightOnly={3}" -f $deviceId, $targetLeBi, $targetTimeText, $PreflightOnly.IsPresent) -Color $script:Palette.Accent
+    if ($Calibrate) {
+        Add-LogLine -Text ("[UI] 校准请求: device={0}" -f $deviceId) -Color $script:Palette.Accent
+    } else {
+        Add-LogLine -Text ("[UI] Start request: device={0}, target={1}, executeAt={2}, preflightOnly={3}" -f $deviceId, $targetLeBi, $targetTimeText, $PreflightOnly.IsPresent) -Color $script:Palette.Accent
+    }
     $script:CurrentRunIsPreflight = $PreflightOnly.IsPresent
+    $script:CurrentRunIsCalibrate = $Calibrate.IsPresent
 
     $argumentList = @(
         "-NoProfile",
@@ -654,9 +684,8 @@ function Start-Run {
         "-TargetTimeText", $targetTimeText
     )
 
-    if ($PreflightOnly) {
-        $argumentList += "-PreflightOnly"
-    }
+    if ($PreflightOnly) { $argumentList += "-PreflightOnly" }
+    if ($Calibrate)     { $argumentList += "-Calibrate" }
 
     $script:CurrentProcess = Start-Process `
         -FilePath "powershell.exe" `
@@ -669,7 +698,13 @@ function Start-Run {
 
     $script:StdoutOffset = 0L
     $script:StderrOffset = 0L
-    $statusLabel.Text = if ($PreflightOnly) { "Checking" } else { "Running" }
+    if ($Calibrate) {
+        $statusLabel.Text = "Calibrating"
+    } elseif ($PreflightOnly) {
+        $statusLabel.Text = "Checking"
+    } else {
+        $statusLabel.Text = "Running"
+    }
     $statusLabel.ForeColor = $script:Palette.Accent
     Set-UiRunningState -IsRunning $true
     $pollTimer.Start()
@@ -695,6 +730,10 @@ $startButton.Add_Click({
 
 $preflightButton.Add_Click({
     Start-Run -PreflightOnly
+})
+
+$calibrateButton.Add_Click({
+    Start-Run -Calibrate
 })
 
 $refreshDevicesButton.Add_Click({
