@@ -1731,12 +1731,6 @@ function Run-ExchangeFlowFast {
     $rechargeStage = [System.Diagnostics.Stopwatch]::StartNew()
     Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
     Start-Sleep -Milliseconds $rechargeDelayMs
-    try {
-        $serviceSnapshot = Get-UiSnapshot -ForceRefresh
-        [void](Resolve-TapPointFromSnapshot -ActionName "ServicePageMarker" -Snapshot $serviceSnapshot)
-    }
-    catch {
-    }
     Write-StageDuration -StageName "Execution stage RechargeCard -> ServiceExchange ready" -Stopwatch $rechargeStage
 
     $serviceStage = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1744,24 +1738,8 @@ function Run-ExchangeFlowFast {
     Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
     Start-Sleep -Milliseconds $popupDelayMs
 
-    $popupExchangePoint = $null
-    $popupPlusPoint = $null
-    try {
-        $popupSnapshot = Get-UiSnapshot -ForceRefresh
-        $popupExchangePoint = Resolve-TapPointFromSnapshot -ActionName "PopupExchange" -Snapshot $popupSnapshot -AllowFallback
-        if ($PlusTapCount -gt 0) {
-            $popupPlusPoint = Resolve-TapPointFromSnapshot -ActionName "PopupPlus" -Snapshot $popupSnapshot -AllowFallback -AnchorPoint $popupExchangePoint
-        }
-    }
-    catch {
-    }
-
-    if (-not $popupExchangePoint) {
-        $popupExchangePoint = Get-StaticTapPoint -ActionName "PopupExchange"
-    }
-    if (-not $popupPlusPoint) {
-        $popupPlusPoint = Get-StaticTapPoint -ActionName "PopupPlus" -FallbackPoint (Get-ScaledTapPoint -ActionName "PopupPlus" -AnchorPoint $popupExchangePoint)
-    }
+    $popupExchangePoint = Get-StaticTapPoint -ActionName "PopupExchange"
+    $popupPlusPoint = Get-StaticTapPoint -ActionName "PopupPlus" -FallbackPoint (Get-ScaledTapPoint -ActionName "PopupPlus" -AnchorPoint $popupExchangePoint)
 
     Write-Log ("TurboMode popup points: PopupExchange via {0}; PopupPlus via {1}." -f $popupExchangePoint.Source, $popupPlusPoint.Source)
     Write-StageDuration -StageName "Execution stage ServiceExchange -> Popup ready" -Stopwatch $serviceStage
