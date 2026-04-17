@@ -434,7 +434,6 @@ function Set-UiRunningState {
     $deviceComboBox.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
     $refreshDevicesButton.Enabled = -not $IsRunning
     $startButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
-    $preflightButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
     $calibrateButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
 }
 
