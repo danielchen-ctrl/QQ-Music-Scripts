@@ -2151,48 +2151,35 @@ function Run-CalibrateFlow {
         $script:DeviceProfile.Manufacturer, $script:DeviceProfile.Model, `
         $script:DeviceProfile.Resolution, $script:DeviceProfile.Density)
 
-    # Step 1: 重新从屏幕获取 RechargeCard 位置
-    Write-Log "正在从当前屏幕获取乐币充值入口位置..."
-    $rechargeExecutionPoint = Resolve-TapPoint -ActionName "RechargeCard" -ForceRefresh -AllowFallback
-    if (-not $rechargeExecutionPoint) {
-        throw "找不到乐币充值按钮，请确认已停留在 QQ 音乐乐币搜索结果页。"
-    }
+    # Step 1: 直接使用预检阶段已获取的 RechargeCard 坐标，无需重复 dump
+    $rechargeExecutionPoint = $RechargePoint
     Write-Log ("RechargeCard: ({0},{1}) via {2}" -f `
         $rechargeExecutionPoint.X, $rechargeExecutionPoint.Y, $rechargeExecutionPoint.Source)
 
-    # Step 2: 点击 RechargeCard，等待服务页出现
+    # Step 2: 点击 RechargeCard，固定等待服务页加载（不用 dump 轮询）
     Write-Log "正在点击乐币充值入口，等待服务页加载..."
     Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
-
-    $servicePoint = Wait-ForTapPoint -ActionName "ServiceExchange" -TimeoutMs 4000 -PollMs 80 -AllowFallback
-    if (-not $servicePoint) {
-        throw "服务页未出现，请检查 QQ 音乐是否响应正常。"
-    }
+    Start-Sleep -Milliseconds 2000
+    $servicePoint = Get-ScaledTapPoint -ActionName "ServiceExchange"
     Write-Log ("ServiceExchange: ({0},{1}) via {2}" -f `
         $servicePoint.X, $servicePoint.Y, $servicePoint.Source)
 
-    # Step 3: 点击 ServiceExchange，等待弹框出现
+    # Step 3: 点击 ServiceExchange，固定等待弹框出现，一次 dump 捕获所有弹框坐标
     Write-Log "正在点击服务兑换，等待弹框出现..."
     Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
-
-    $popupExchangePoint = Wait-ForTapPoint -ActionName "PopupExchange" -TimeoutMs 4000 -PollMs 80 -AllowFallback
-    if (-not $popupExchangePoint) {
-        throw "兑换弹框未出现，ServiceExchange 坐标可能不准确。"
-    }
-    Write-Log ("PopupExchange: ({0},{1}) via {2}" -f `
-        $popupExchangePoint.X, $popupExchangePoint.Y, $popupExchangePoint.Source)
-
-    # Step 4: 捕获弹框内所有按钮坐标
-    Write-Log "正在捕获弹框内所有按钮坐标..."
+    Start-Sleep -Milliseconds 2000
     $snapshot = Get-UiSnapshot -ForceRefresh
-    $popupPlusPoint   = Resolve-TapPointFromSnapshot -ActionName "PopupPlus"   -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
-    $popupMinusPoint  = Resolve-TapPointFromSnapshot -ActionName "PopupMinus"  -Snapshot $snapshot -AllowFallback
-    $popupCancelPoint = Resolve-TapPointFromSnapshot -ActionName "PopupCancel" -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
+
+    $popupExchangePoint = Resolve-TapPointFromSnapshot -ActionName "PopupExchange" -Snapshot $snapshot -AllowFallback
+    $popupPlusPoint     = Resolve-TapPointFromSnapshot -ActionName "PopupPlus"     -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
+    $popupMinusPoint    = Resolve-TapPointFromSnapshot -ActionName "PopupMinus"    -Snapshot $snapshot -AllowFallback
+    $popupCancelPoint   = Resolve-TapPointFromSnapshot -ActionName "PopupCancel"   -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
 
     foreach ($item in @(
-        @{ Name = "PopupPlus";    Point = $popupPlusPoint   },
-        @{ Name = "PopupMinus";   Point = $popupMinusPoint  },
-        @{ Name = "PopupCancel";  Point = $popupCancelPoint }
+        @{ Name = "PopupExchange"; Point = $popupExchangePoint },
+        @{ Name = "PopupPlus";     Point = $popupPlusPoint     },
+        @{ Name = "PopupMinus";    Point = $popupMinusPoint     },
+        @{ Name = "PopupCancel";   Point = $popupCancelPoint   }
     )) {
         if ($item.Point) {
             Write-Log ("{0}: ({1},{2}) via {3}" -f $item.Name, $item.Point.X, $item.Point.Y, $item.Point.Source)
@@ -2236,6 +2223,12 @@ function Try-Prime-RehearsalCache {
     }
 
     if (-not $ManualStartMode) {
+        return $RechargePoint
+    }
+
+    # 有 calibration profile 时坐标和延迟已确定，跳过 rehearsal 避免 dump 污染计时
+    if ($script:CalibrationProfile) {
+        Write-Log "Skipping rehearsal: calibration profile active."
         return $RechargePoint
     }
 
