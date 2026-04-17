@@ -2427,6 +2427,11 @@ function Run-PreflightChecks {
     Initialize-ExecutionModes
     $script:CalibrationProfile = Load-CalibrationProfile
     $script:RehearsalCache = Load-RehearsalCache
+    # calibration profile 优先：有 calibration 时忽略旧的 rehearsal cache，
+    # 防止含错误延迟的旧缓存覆盖 calibration 的正确值
+    if ($script:CalibrationProfile -and $script:RehearsalCache) {
+        $script:RehearsalCache = $null
+    }
     Select-ExecutionMode
 
     Write-Log ("Device profile: {0} {1}, Android {2}, resolution {3}, density {4}" -f `
