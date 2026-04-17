@@ -11,12 +11,14 @@
     [switch]$DryRun,
     [switch]$PreflightOnly,
     [switch]$RehearsalOnly,
+    [switch]$Calibrate,
     [switch]$ListDevicesJson,
     [string]$ArtifactRoot,
     [int]$RechargeToServiceTapDelayMs = 0,
     [int]$ServiceToPopupTapDelayMs = 0,
     [int]$PreBurstSettleMs = 0,
-    [int]$RehearsalSafetyMarginMs = 80
+    [int]$RehearsalSafetyMarginMs = 80,
+    [string]$ExitMarkerPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -144,8 +146,8 @@ $Timing = @{
 
 $FastTiming = @{
     InitialSettleMs          = 100
-    RechargeToServiceMs      = 260
-    ServiceToPopupMs         = 220
+    RechargeToServiceMs      = 600
+    ServiceToPopupMs         = 400
     PreBurstSettleMs         = 40
     QuickCheckBudgetMs       = 420
     QuickPollMs              = 60
@@ -174,8 +176,8 @@ $KnownFastDeviceProfiles = @(
             PopupExchange   = @{ X = 838; Y = 1711 }
         }
         Delays       = @{
-            RechargeToServiceTapDelayMs = 260
-            ServiceToPopupTapDelayMs    = 220
+            RechargeToServiceTapDelayMs = 600
+            ServiceToPopupTapDelayMs    = 400
             PreBurstSettleMs            = 40
         }
     }
@@ -390,18 +392,18 @@ function Invoke-DeviceShell {
         [switch]$AllowFailure
     )
 
-    $args = (Get-AdbDeviceArgs) + @("shell", $Command)
-    return Invoke-Adb -Arguments $args -AllowFailure:$AllowFailure
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", $Command)
+    return Invoke-Adb -Arguments $adbArgs -AllowFailure:$AllowFailure
 }
 
 function Get-DeviceTimeText {
-    $args = (Get-AdbDeviceArgs) + @("shell", "date", "+%H:%M:%S")
-    return (Invoke-Adb -Arguments $args).Trim()
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "date", "+%H:%M:%S")
+    return (Invoke-Adb -Arguments $adbArgs).Trim()
 }
 
 function Get-DeviceResolution {
-    $args = (Get-AdbDeviceArgs) + @("shell", "wm", "size")
-    $raw = Invoke-Adb -Arguments $args
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "wm", "size")
+    $raw = Invoke-Adb -Arguments $adbArgs
 
     foreach ($line in ($raw -split "`r?`n")) {
         if ($line -match "(\d+)x(\d+)") {
@@ -417,8 +419,8 @@ function Get-DeviceResolution {
 }
 
 function Get-DeviceDensityText {
-    $args = (Get-AdbDeviceArgs) + @("shell", "wm", "density")
-    $raw = Invoke-Adb -Arguments $args -AllowFailure
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "wm", "density")
+    $raw = Invoke-Adb -Arguments $adbArgs -AllowFailure
     $match = [regex]::Match($raw, "(\d+)")
     if ($match.Success) {
         return $match.Value
@@ -430,8 +432,8 @@ function Get-DeviceDensityText {
 function Get-DeviceProp {
     param([string]$Name)
 
-    $args = (Get-AdbDeviceArgs) + @("shell", "getprop", $Name)
-    return (Invoke-Adb -Arguments $args -AllowFailure).Trim()
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "getprop", $Name)
+    return (Invoke-Adb -Arguments $adbArgs -AllowFailure).Trim()
 }
 
 function Get-DeviceProfile {
@@ -828,6 +830,41 @@ function Save-RehearsalCache {
     Write-Log "Rehearsal capture completed."
 }
 
+function Save-CalibrationProfile {
+    param(
+        [pscustomobject]$RechargePoint,
+        [pscustomobject]$ServicePoint,
+        [pscustomobject]$PopupPlusPoint,
+        [pscustomobject]$PopupExchangePoint,
+        [pscustomobject]$PopupMinusPoint,
+        [pscustomobject]$PopupCancelPoint
+    )
+
+    $path = Get-CalibrationPath
+
+    $payload = [ordered]@{
+        DeviceId        = $script:DeviceId
+        DeviceSignature = Get-DeviceSignature
+        SavedAt         = (Get-Date).ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
+        Points          = [ordered]@{
+            RechargeCard    = Convert-TapPointForStorage -Point $RechargePoint
+            ServiceExchange = Convert-TapPointForStorage -Point $ServicePoint
+            PopupPlus       = Convert-TapPointForStorage -Point $PopupPlusPoint
+            PopupExchange   = Convert-TapPointForStorage -Point $PopupExchangePoint
+            PopupMinus      = Convert-TapPointForStorage -Point $PopupMinusPoint
+            PopupCancel     = Convert-TapPointForStorage -Point $PopupCancelPoint
+        }
+        Delays          = [ordered]@{
+            RechargeToServiceTapDelayMs = $FastTiming.RechargeToServiceMs
+            ServiceToPopupTapDelayMs    = $FastTiming.ServiceToPopupMs
+            PreBurstSettleMs            = $FastTiming.PreBurstSettleMs
+        }
+    }
+
+    Save-JsonFile -Path $path -Value $payload
+    Write-Log ("Calibration profile saved to: {0}" -f $path)
+}
+
 function Get-CurrentDeviceTime {
     $currentText = Get-DeviceTimeText
     $timeMatch = [regex]::Match($currentText, '\b\d{2}:\d{2}:\d{2}\b')
@@ -840,7 +877,9 @@ function Get-CurrentDeviceTime {
 
 function Get-MillisecondsUntilTargetTime {
     $currentTime = Get-CurrentDeviceTime
-    return [int][Math]::Round(($TargetTime - $currentTime).TotalMilliseconds)
+    $ms = [Math]::Round(($TargetTime - $currentTime).TotalMilliseconds)
+    if ($ms -lt 0) { $ms += 86400000 }
+    return [int]$ms
 }
 
 function Get-ConfiguredDelayMs {
@@ -933,8 +972,8 @@ function Assert-QqMusicForeground {
 }
 
 function Assert-QqMusicInstalled {
-    $args = (Get-AdbDeviceArgs) + @("shell", "pm", "path", $QqMusicPackage)
-    $raw = Invoke-Adb -Arguments $args -AllowFailure
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "pm", "path", $QqMusicPackage)
+    $raw = Invoke-Adb -Arguments $adbArgs -AllowFailure
     if ($raw -notmatch "^package:") {
         throw "QQ Music ($QqMusicPackage) is not installed on the selected device."
     }
@@ -1719,59 +1758,104 @@ function Resolve-TapPointFromSnapshot {
     return $null
 }
 
+function Build-TurboSequenceCommand {
+    param(
+        [pscustomobject]$RechargePoint,
+        [pscustomobject]$ServicePoint,
+        [int]$RechargeDelayMs,
+        [int]$PopupDelayMs,
+        [int]$PreBurstDelayMs,
+        [pscustomobject]$PlusPoint,
+        [pscustomobject]$ExchangePoint
+    )
+
+    $sleepRecharge = Get-ShellSecondsText -Milliseconds $RechargeDelayMs
+    $sleepPopup    = Get-ShellSecondsText -Milliseconds $PopupDelayMs
+
+    $exchangeCommand = if ($BurstOnly) { ':' } else {
+        'cmd input tap {0} {1}' -f $ExchangePoint.X, $ExchangePoint.Y
+    }
+
+    $burstSegment = if ($PlusTapCount -gt 0) {
+        'count=0; while [ $count -lt {0} ]; do cmd input tap {1} {2}; count=$((count+1)); done' -f `
+            $PlusTapCount, $PlusPoint.X, $PlusPoint.Y
+    } else { ':' }
+
+    $segments = [System.Collections.Generic.List[string]]::new()
+    $segments.Add('tapStart=$(date +%s%3N)')
+    $segments.Add(('cmd input tap {0} {1}' -f $RechargePoint.X, $RechargePoint.Y))
+    $segments.Add(('sleep {0}' -f $sleepRecharge))
+    $segments.Add('serviceAt=$(date +%s%3N)')
+    $segments.Add(('cmd input tap {0} {1}' -f $ServicePoint.X, $ServicePoint.Y))
+    $segments.Add(('sleep {0}' -f $sleepPopup))
+    if ($PreBurstDelayMs -gt 0) {
+        $segments.Add(('sleep {0}' -f (Get-ShellSecondsText -Milliseconds $PreBurstDelayMs)))
+    }
+    $segments.Add('popupAt=$(date +%s%3N)')
+    $segments.Add($burstSegment)
+    $segments.Add('plusEnd=$(date +%s%3N)')
+    $segments.Add($exchangeCommand)
+    $segments.Add('end=$(date +%s%3N)')
+    $segments.Add('echo "$tapStart $serviceAt $popupAt $plusEnd $end"')
+
+    return ($segments -join '; ')
+}
+
 function Run-ExchangeFlowFast {
     param([pscustomobject]$RechargePoint)
 
     $overallStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $rechargeDelayMs = Get-ConfiguredDelayMs -DelayName "RechargeToServiceTapDelayMs" -DefaultValue $FastTiming.RechargeToServiceMs -OverrideValue $RechargeToServiceTapDelayMs
-    $popupDelayMs = Get-ConfiguredDelayMs -DelayName "ServiceToPopupTapDelayMs" -DefaultValue $FastTiming.ServiceToPopupMs -OverrideValue $ServiceToPopupTapDelayMs
-    $preBurstDelayMs = Get-ConfiguredDelayMs -DelayName "PreBurstSettleMs" -DefaultValue $FastTiming.PreBurstSettleMs -OverrideValue $PreBurstSettleMs
+    $popupDelayMs    = Get-ConfiguredDelayMs -DelayName "ServiceToPopupTapDelayMs"    -DefaultValue $FastTiming.ServiceToPopupMs    -OverrideValue $ServiceToPopupTapDelayMs
+    $preBurstDelayMs = Get-ConfiguredDelayMs -DelayName "PreBurstSettleMs"            -DefaultValue $FastTiming.PreBurstSettleMs    -OverrideValue $PreBurstSettleMs
 
     $rechargeExecutionPoint = Get-StaticTapPoint -ActionName "RechargeCard" -FallbackPoint $RechargePoint
-    $rechargeStage = [System.Diagnostics.Stopwatch]::StartNew()
-    Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
-    Start-Sleep -Milliseconds $rechargeDelayMs
-    try {
-        $serviceSnapshot = Get-UiSnapshot -ForceRefresh
-        [void](Resolve-TapPointFromSnapshot -ActionName "ServicePageMarker" -Snapshot $serviceSnapshot)
-    }
-    catch {
-    }
-    Write-StageDuration -StageName "Execution stage RechargeCard -> ServiceExchange ready" -Stopwatch $rechargeStage
+    $servicePoint           = Get-StaticTapPoint -ActionName "ServiceExchange"
+    $popupExchangePoint     = Get-StaticTapPoint -ActionName "PopupExchange"
+    $popupPlusPoint         = Get-StaticTapPoint -ActionName "PopupPlus" -FallbackPoint (Get-ScaledTapPoint -ActionName "PopupPlus" -AnchorPoint $popupExchangePoint)
 
-    $serviceStage = [System.Diagnostics.Stopwatch]::StartNew()
-    $servicePoint = Get-StaticTapPoint -ActionName "ServiceExchange"
-    Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
-    Start-Sleep -Milliseconds $popupDelayMs
+    Write-Log ("TurboMode tap points: RechargeCard ({0},{1}) via {2}; ServiceExchange ({3},{4}) via {5}." -f `
+        $rechargeExecutionPoint.X, $rechargeExecutionPoint.Y, $rechargeExecutionPoint.Source, `
+        $servicePoint.X, $servicePoint.Y, $servicePoint.Source)
+    Write-Log ("TurboMode popup points: PopupExchange via {0}; PopupPlus via {1}." -f `
+        $popupExchangePoint.Source, $popupPlusPoint.Source)
 
-    $popupExchangePoint = $null
-    $popupPlusPoint = $null
-    try {
-        $popupSnapshot = Get-UiSnapshot -ForceRefresh
-        $popupExchangePoint = Resolve-TapPointFromSnapshot -ActionName "PopupExchange" -Snapshot $popupSnapshot -AllowFallback
-        if ($PlusTapCount -gt 0) {
-            $popupPlusPoint = Resolve-TapPointFromSnapshot -ActionName "PopupPlus" -Snapshot $popupSnapshot -AllowFallback -AnchorPoint $popupExchangePoint
-        }
-    }
-    catch {
+    if ($DryRun) {
+        Write-Log "DryRun: full turbo sequence skipped."
+        Write-StageDuration -StageName "Final total duration" -Stopwatch $overallStopwatch
+        Write-Log "TurboMode path completed."
+        return
     }
 
-    if (-not $popupExchangePoint) {
-        $popupExchangePoint = Get-StaticTapPoint -ActionName "PopupExchange"
-    }
-    if (-not $popupPlusPoint) {
-        $popupPlusPoint = Get-StaticTapPoint -ActionName "PopupPlus" -FallbackPoint (Get-ScaledTapPoint -ActionName "PopupPlus" -AnchorPoint $popupExchangePoint)
+    $actionText = if ($BurstOnly) { "without the final exchange tap" } else { "and then tapping PopupExchange" }
+    Write-Log ("Running full turbo sequence to {0} lebi with {1} plus tap(s) {2}." -f $TargetLeBi, $PlusTapCount, $actionText)
+
+    $shellCmd = Build-TurboSequenceCommand `
+        -RechargePoint   $rechargeExecutionPoint `
+        -ServicePoint    $servicePoint `
+        -RechargeDelayMs $rechargeDelayMs `
+        -PopupDelayMs    $popupDelayMs `
+        -PreBurstDelayMs $preBurstDelayMs `
+        -PlusPoint       $popupPlusPoint `
+        -ExchangePoint   $popupExchangePoint
+
+    $raw = (Invoke-DeviceShell -Command $shellCmd).Trim()
+
+    if ($raw -match '(\d{13})\s+(\d{13})\s+(\d{13})\s+(\d{13})\s+(\d{13})') {
+        $tapStartMs  = [int64]$matches[1]
+        $serviceAtMs = [int64]$matches[2]
+        $popupAtMs   = [int64]$matches[3]
+        $plusEndMs   = [int64]$matches[4]
+        $endMs       = [int64]$matches[5]
+
+        Write-Log ("Device-side RechargeCard -> ServiceExchange delay: {0} ms" -f ($serviceAtMs - $tapStartMs))
+        Write-Log ("Device-side ServiceExchange -> Popup burst start: {0} ms"  -f ($popupAtMs   - $serviceAtMs))
+        Write-Log ("Device-side burst +{0} taps: {1} ms"                       -f $PlusTapCount, ($plusEndMs - $popupAtMs))
+        Write-Log ("Device-side full sequence: {0} ms"                         -f ($endMs - $tapStartMs))
+    } elseif (-not [string]::IsNullOrWhiteSpace($raw)) {
+        Write-Log "Turbo sequence raw output: $raw"
     }
 
-    Write-Log ("TurboMode popup points: PopupExchange via {0}; PopupPlus via {1}." -f $popupExchangePoint.Source, $popupPlusPoint.Source)
-    Write-StageDuration -StageName "Execution stage ServiceExchange -> Popup ready" -Stopwatch $serviceStage
-
-    $burstStage = [System.Diagnostics.Stopwatch]::StartNew()
-    if ($preBurstDelayMs -gt 0) {
-        Start-Sleep -Milliseconds $preBurstDelayMs
-    }
-    Run-PopupBurst -PlusPoint $popupPlusPoint -ExchangePoint $popupExchangePoint
-    Write-StageDuration -StageName "Execution stage Popup burst -> Exchange tap" -Stopwatch $burstStage
     Write-StageDuration -StageName "Final total duration" -Stopwatch $overallStopwatch
     Write-Log "TurboMode path completed."
 }
@@ -2059,6 +2143,78 @@ function Run-RehearsalFlow {
     return $returnRechargePoint
 }
 
+function Run-CalibrateFlow {
+    param([pscustomobject]$RechargePoint)
+
+    Write-Log "=== 设备校准开始 ==="
+    Write-Log ("设备: {0} {1} | 分辨率: {2} | 密度: {3}" -f `
+        $script:DeviceProfile.Manufacturer, $script:DeviceProfile.Model, `
+        $script:DeviceProfile.Resolution, $script:DeviceProfile.Density)
+
+    # Step 1: 直接使用预检阶段已获取的 RechargeCard 坐标，无需重复 dump
+    $rechargeExecutionPoint = $RechargePoint
+    Write-Log ("RechargeCard: ({0},{1}) via {2}" -f `
+        $rechargeExecutionPoint.X, $rechargeExecutionPoint.Y, $rechargeExecutionPoint.Source)
+
+    # Step 2: 点击 RechargeCard，固定等待服务页加载（不用 dump 轮询）
+    Write-Log "正在点击乐币充值入口，等待服务页加载..."
+    Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
+    Start-Sleep -Milliseconds 2000
+    $servicePoint = Get-ScaledTapPoint -ActionName "ServiceExchange"
+    Write-Log ("ServiceExchange: ({0},{1}) via {2}" -f `
+        $servicePoint.X, $servicePoint.Y, $servicePoint.Source)
+
+    # Step 3: 点击 ServiceExchange，固定等待弹框出现，一次 dump 捕获所有弹框坐标
+    Write-Log "正在点击服务兑换，等待弹框出现..."
+    Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
+    Start-Sleep -Milliseconds 2000
+    $snapshot = Get-UiSnapshot -ForceRefresh
+
+    $popupExchangePoint = Resolve-TapPointFromSnapshot -ActionName "PopupExchange" -Snapshot $snapshot -AllowFallback
+    $popupPlusPoint     = Resolve-TapPointFromSnapshot -ActionName "PopupPlus"     -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
+    $popupMinusPoint    = Resolve-TapPointFromSnapshot -ActionName "PopupMinus"    -Snapshot $snapshot -AllowFallback
+    $popupCancelPoint   = Resolve-TapPointFromSnapshot -ActionName "PopupCancel"   -Snapshot $snapshot -AllowFallback -AnchorPoint $popupExchangePoint
+
+    foreach ($item in @(
+        @{ Name = "PopupExchange"; Point = $popupExchangePoint },
+        @{ Name = "PopupPlus";     Point = $popupPlusPoint     },
+        @{ Name = "PopupMinus";    Point = $popupMinusPoint     },
+        @{ Name = "PopupCancel";   Point = $popupCancelPoint   }
+    )) {
+        if ($item.Point) {
+            Write-Log ("{0}: ({1},{2}) via {3}" -f $item.Name, $item.Point.X, $item.Point.Y, $item.Point.Source)
+        } else {
+            Write-Log ("{0}: 未找到（将在执行时使用缩放坐标）" -f $item.Name)
+        }
+    }
+
+    # Step 5: 回滚（关闭弹框），返回初始页
+    Write-Log "正在关闭弹框，返回初始页..."
+    if ($popupMinusPoint) {
+        Invoke-TapAction -ActionName "PopupMinus" -Point $popupMinusPoint
+    } elseif ($popupCancelPoint) {
+        Invoke-TapAction -ActionName "PopupCancel" -Point $popupCancelPoint
+    } else {
+        Invoke-DeviceBack
+    }
+    Start-Sleep -Milliseconds $Rehearsal.ReturnSettleMs
+    [void](Return-ToManualStartPage)
+
+    # Step 6: 保存校准数据（永久，不过期）
+    Save-CalibrationProfile `
+        -RechargePoint      $rechargeExecutionPoint `
+        -ServicePoint       $servicePoint `
+        -PopupPlusPoint     $popupPlusPoint `
+        -PopupExchangePoint $popupExchangePoint `
+        -PopupMinusPoint    $popupMinusPoint `
+        -PopupCancelPoint   $popupCancelPoint
+
+    Write-Log "=== 校准完成 ==="
+    Write-Log ("延迟配置: 充值->服务页 {0}ms，服务页->弹框 {1}ms（使用设备默认值）" -f `
+        $FastTiming.RechargeToServiceMs, $FastTiming.ServiceToPopupMs)
+    Write-Log "校准数据已永久保存，后续所有执行将自动使用此设备的坐标。"
+}
+
 function Try-Prime-RehearsalCache {
     param([pscustomobject]$RechargePoint)
 
@@ -2067,6 +2223,12 @@ function Try-Prime-RehearsalCache {
     }
 
     if (-not $ManualStartMode) {
+        return $RechargePoint
+    }
+
+    # 有 calibration profile 时坐标和延迟已确定，跳过 rehearsal 避免 dump 污染计时
+    if ($script:CalibrationProfile) {
+        Write-Log "Skipping rehearsal: calibration profile active."
         return $RechargePoint
     }
 
@@ -2265,6 +2427,11 @@ function Run-PreflightChecks {
     Initialize-ExecutionModes
     $script:CalibrationProfile = Load-CalibrationProfile
     $script:RehearsalCache = Load-RehearsalCache
+    # calibration profile 优先：有 calibration 时忽略旧的 rehearsal cache，
+    # 防止含错误延迟的旧缓存覆盖 calibration 的正确值
+    if ($script:CalibrationProfile -and $script:RehearsalCache) {
+        $script:RehearsalCache = $null
+    }
     Select-ExecutionMode
 
     Write-Log ("Device profile: {0} {1}, Android {2}, resolution {3}, density {4}" -f `
@@ -2312,6 +2479,12 @@ function Run-ExchangeFlow {
     if ($RehearsalOnly) {
         [void](Run-RehearsalFlow -RechargePoint $rechargePoint)
         Write-Log "RehearsalOnly is on. Ending after rehearsal capture."
+        return
+    }
+
+    if ($Calibrate) {
+        Run-CalibrateFlow -RechargePoint $rechargePoint
+        Write-Log "Calibration completed successfully."
         return
     }
 
@@ -2375,11 +2548,13 @@ if ($ListDevicesJson) {
 
 try {
     Run-ExchangeFlow
+    if ($ExitMarkerPath) { [System.IO.File]::WriteAllText($ExitMarkerPath, "0") }
     exit 0
 }
 catch {
     Save-RunDiagnostics -Reason "Script failure" -ErrorRecord $_
     Write-Error $_
+    if ($ExitMarkerPath) { [System.IO.File]::WriteAllText($ExitMarkerPath, "1") }
     exit 1
 }
 

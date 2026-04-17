@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$SmokeTest
 )
 
@@ -19,8 +19,10 @@ $script:DefaultTargetLeBi = 330
 $script:DefaultTargetTimeText = "12:00:00"
 $script:CurrentProcess = $null
 $script:CurrentRunIsPreflight = $false
+$script:CurrentRunIsCalibrate = $false
 $script:StdoutPath = $null
 $script:StderrPath = $null
+$script:ExitMarkerPath = $null
 $script:StdoutOffset = 0L
 $script:StderrOffset = 0L
 $script:AvailableDevices = @()
@@ -101,7 +103,7 @@ function Read-NewText {
 }
 
 function Cleanup-RedirectFiles {
-    foreach ($path in @($script:StdoutPath, $script:StderrPath)) {
+    foreach ($path in @($script:StdoutPath, $script:StderrPath, $script:ExitMarkerPath)) {
         if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
@@ -109,6 +111,7 @@ function Cleanup-RedirectFiles {
 
     $script:StdoutPath = $null
     $script:StderrPath = $null
+    $script:ExitMarkerPath = $null
     $script:StdoutOffset = 0L
     $script:StderrOffset = 0L
 }
@@ -116,8 +119,8 @@ function Cleanup-RedirectFiles {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "QQ Music Exchange Console"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(940, 680)
-$form.MinimumSize = New-Object System.Drawing.Size(940, 680)
+$form.Size = New-Object System.Drawing.Size(940, 720)
+$form.MinimumSize = New-Object System.Drawing.Size(940, 720)
 $form.BackColor = $script:Palette.WindowBack
 $form.ForeColor = $script:Palette.Ink
 
@@ -156,7 +159,7 @@ $headerPanel.Controls.Add($chipLabel)
 
 $configCard = New-Object System.Windows.Forms.Panel
 $configCard.Location = New-Object System.Drawing.Point(24, 126)
-$configCard.Size = New-Object System.Drawing.Size(892, 224)
+$configCard.Size = New-Object System.Drawing.Size(892, 264)
 $configCard.Anchor = "Top,Left,Right"
 $configCard.BackColor = $script:Palette.CardBack
 $configCard.BorderStyle = "FixedSingle"
@@ -296,21 +299,20 @@ $clearLogButton.FlatAppearance.BorderColor = $script:Palette.CardBorder
 $clearLogButton.FlatAppearance.BorderSize = 1
 $configCard.Controls.Add($clearLogButton)
 
-$preflightButton = New-Object System.Windows.Forms.Button
-$preflightButton.Location = New-Object System.Drawing.Point(734, 148)
-$preflightButton.Size = New-Object System.Drawing.Size(126, 34)
-$preflightButton.Text = "Run Check"
-$preflightButton.Font = New-UiFont -Name "Segoe UI" -Size 9.5
-$preflightButton.BackColor = $script:Palette.CardBack
-$preflightButton.ForeColor = $script:Palette.Ink
-$preflightButton.FlatStyle = "Flat"
-$preflightButton.FlatAppearance.BorderColor = $script:Palette.CardBorder
-$preflightButton.FlatAppearance.BorderSize = 1
-$configCard.Controls.Add($preflightButton)
-[void]$toolTip.SetToolTip($preflightButton, "Verify the current page is already on QQ Music '乐币' search results and the RechargeCard can be resolved, without sending taps.")
+$calibrateButton = New-Object System.Windows.Forms.Button
+$calibrateButton.Location = New-Object System.Drawing.Point(734, 148)
+$calibrateButton.Size = New-Object System.Drawing.Size(126, 56)
+$calibrateButton.Text = "校准设备"
+$calibrateButton.Font = New-UiFont -Name "Segoe UI Semibold" -Size 10
+$calibrateButton.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2E6DA4")
+$calibrateButton.ForeColor = [System.Drawing.Color]::White
+$calibrateButton.FlatStyle = "Flat"
+$calibrateButton.FlatAppearance.BorderSize = 0
+$configCard.Controls.Add($calibrateButton)
+[void]$toolTip.SetToolTip($calibrateButton, "新设备首次使用时点击：自动导航各页面，捕获当前手机的精确坐标，无需时间限制，完成后数据永久保存供后续执行使用。")
 
 $logCard = New-Object System.Windows.Forms.Panel
-$logCard.Location = New-Object System.Drawing.Point(24, 372)
+$logCard.Location = New-Object System.Drawing.Point(24, 412)
 $logCard.Size = New-Object System.Drawing.Size(892, 250)
 $logCard.Anchor = "Top,Bottom,Left,Right"
 $logCard.BackColor = $script:Palette.CardBack
@@ -432,7 +434,7 @@ function Set-UiRunningState {
     $deviceComboBox.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
     $refreshDevicesButton.Enabled = -not $IsRunning
     $startButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
-    $preflightButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
+    $calibrateButton.Enabled = (-not $IsRunning) -and ($script:AvailableDevices.Count -gt 0)
 }
 
 function Update-CountdownDisplay {
@@ -460,6 +462,12 @@ function Update-CountdownDisplay {
     $now = Get-Date
     $targetDateTime = $now.Date.Add($targetTime)
     $remaining = $targetDateTime - $now
+
+    # 目标时间已过超过 1 秒，则视为明天的目标
+    if ($remaining.TotalSeconds -lt -1) {
+        $targetDateTime = $targetDateTime.AddDays(1)
+        $remaining = $targetDateTime - $now
+    }
 
     if ($remaining.TotalSeconds -le 0) {
         if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
@@ -565,27 +573,43 @@ function Finish-Run {
     }
 
     Flush-ProcessLogs
-    try {
-        $script:CurrentProcess.WaitForExit()
+    try { $script:CurrentProcess.WaitForExit() } catch {}
+
+    # 从 marker 文件读退出码（比 Process.ExitCode 在 PS5.1 上更可靠）
+    $exitCode = -1
+    $markerPath = $script:ExitMarkerPath
+    if (-not [string]::IsNullOrWhiteSpace($markerPath)) {
+        for ($i = 0; $i -lt 10; $i++) {
+            if (Test-Path -LiteralPath $markerPath) { break }
+            Start-Sleep -Milliseconds 50
+        }
+        try {
+            $raw = [System.IO.File]::ReadAllText($markerPath).Trim()
+            $exitCode = [int]$raw
+        } catch {}
+    } else {
+        try {
+            $raw = $script:CurrentProcess.ExitCode
+            if ($null -ne $raw) { $exitCode = $raw }
+        } catch {}
     }
-    catch {
-    }
-    $exitCode = $script:CurrentProcess.ExitCode
-    if ($null -eq $exitCode) {
-        $exitCode = -1
-    }
+
     $script:CurrentProcess.Dispose()
     $script:CurrentProcess = $null
     Set-UiRunningState -IsRunning $false
     Update-CountdownDisplay
 
     if ($exitCode -eq 0) {
-        $statusLabel.Text = if ($script:CurrentRunIsPreflight) { "Checked" } else { "Done" }
-        $statusLabel.ForeColor = $script:Palette.Success
-        if ($script:CurrentRunIsPreflight) {
-            Add-LogLine -Text ("[UI] Run check completed successfully at {0}." -f (Get-Date -Format "HH:mm:ss")) -Color $script:Palette.Success
-        }
-        else {
+        if ($script:CurrentRunIsCalibrate) {
+            $statusLabel.Text = "Calibrated"
+            $statusLabel.ForeColor = $script:Palette.Success
+            # 校准按钮变绿，显示"✓ 已校准"
+            $calibrateButton.Text = "✓ 已校准"
+            $calibrateButton.BackColor = $script:Palette.Success
+            Add-LogLine -Text ("[UI] 设备校准完成 at {0}。后续执行将自动使用此设备的坐标。" -f (Get-Date -Format "HH:mm:ss")) -Color $script:Palette.Success
+        } else {
+            $statusLabel.Text = "Done"
+            $statusLabel.ForeColor = $script:Palette.Success
             Add-LogLine -Text ("[UI] Script finished successfully at {0}." -f (Get-Date -Format "HH:mm:ss")) -Color $script:Palette.Success
         }
     }
@@ -597,19 +621,20 @@ function Finish-Run {
 
     Cleanup-RedirectFiles
     $script:CurrentRunIsPreflight = $false
+    $script:CurrentRunIsCalibrate = $false
 }
 
 function Start-Run {
-    param([switch]$PreflightOnly)
+    param(
+        [switch]$PreflightOnly,
+        [switch]$Calibrate
+    )
 
     if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
         return
     }
 
-    $targetLeBi = [int]$targetInput.Value
-    $targetTimeText = $timeInput.Text.Trim()
     $deviceId = Get-SelectedDeviceId
-
     if ([string]::IsNullOrWhiteSpace($deviceId)) {
         [void][System.Windows.Forms.MessageBox]::Show(
             "Please refresh and choose one connected Android device first.",
@@ -620,30 +645,42 @@ function Start-Run {
         return
     }
 
-    try {
-        [void][TimeSpan]::ParseExact(
-            $targetTimeText,
-            "hh\:mm\:ss",
-            [System.Globalization.CultureInfo]::InvariantCulture
-        )
-    }
-    catch {
-        [void][System.Windows.Forms.MessageBox]::Show(
-            "Time must use HH:mm:ss, for example 12:00:00.",
-            "Invalid Time",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        $timeInput.Focus()
-        return
+    $targetLeBi    = [int]$targetInput.Value
+    $targetTimeText = if ($Calibrate) { "00:00:00" } else { $timeInput.Text.Trim() }
+
+    if (-not $Calibrate) {
+        try {
+            [void][TimeSpan]::ParseExact(
+                $targetTimeText,
+                "hh\:mm\:ss",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        catch {
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "Time must use HH:mm:ss, for example 12:00:00.",
+                "Invalid Time",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            $timeInput.Focus()
+            return
+        }
     }
 
     Cleanup-RedirectFiles
-    $script:StdoutPath = Join-Path $env:TEMP ("qq_music_exchange_stdout_{0}.log" -f ([guid]::NewGuid().ToString("N")))
-    $script:StderrPath = Join-Path $env:TEMP ("qq_music_exchange_stderr_{0}.log" -f ([guid]::NewGuid().ToString("N")))
+    $runId = [guid]::NewGuid().ToString("N")
+    $script:StdoutPath    = Join-Path $env:TEMP ("qq_music_exchange_stdout_{0}.log"  -f $runId)
+    $script:StderrPath    = Join-Path $env:TEMP ("qq_music_exchange_stderr_{0}.log"  -f $runId)
+    $script:ExitMarkerPath = Join-Path $env:TEMP ("qq_music_exchange_marker_{0}.txt" -f $runId)
 
-    Add-LogLine -Text ("[UI] Start request: device={0}, target={1}, executeAt={2}, preflightOnly={3}" -f $deviceId, $targetLeBi, $targetTimeText, $PreflightOnly.IsPresent) -Color $script:Palette.Accent
+    if ($Calibrate) {
+        Add-LogLine -Text ("[UI] 校准请求: device={0}" -f $deviceId) -Color $script:Palette.Accent
+    } else {
+        Add-LogLine -Text ("[UI] Start request: device={0}, target={1}, executeAt={2}, preflightOnly={3}" -f $deviceId, $targetLeBi, $targetTimeText, $PreflightOnly.IsPresent) -Color $script:Palette.Accent
+    }
     $script:CurrentRunIsPreflight = $PreflightOnly.IsPresent
+    $script:CurrentRunIsCalibrate = $Calibrate.IsPresent
 
     $argumentList = @(
         "-NoProfile",
@@ -654,9 +691,9 @@ function Start-Run {
         "-TargetTimeText", $targetTimeText
     )
 
-    if ($PreflightOnly) {
-        $argumentList += "-PreflightOnly"
-    }
+    if ($PreflightOnly) { $argumentList += "-PreflightOnly" }
+    if ($Calibrate)     { $argumentList += "-Calibrate" }
+    $argumentList += @("-ExitMarkerPath", $script:ExitMarkerPath)
 
     $script:CurrentProcess = Start-Process `
         -FilePath "powershell.exe" `
@@ -669,7 +706,16 @@ function Start-Run {
 
     $script:StdoutOffset = 0L
     $script:StderrOffset = 0L
-    $statusLabel.Text = if ($PreflightOnly) { "Checking" } else { "Running" }
+    if ($Calibrate) {
+        $statusLabel.Text = "Calibrating"
+        # 重置校准按钮到初始蓝色（下次校准前清除上次结果）
+        $calibrateButton.Text = "校准设备"
+        $calibrateButton.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2E6DA4")
+    } elseif ($PreflightOnly) {
+        $statusLabel.Text = "Checking"
+    } else {
+        $statusLabel.Text = "Running"
+    }
     $statusLabel.ForeColor = $script:Palette.Accent
     Set-UiRunningState -IsRunning $true
     $pollTimer.Start()
@@ -693,8 +739,8 @@ $startButton.Add_Click({
     Start-Run
 })
 
-$preflightButton.Add_Click({
-    Start-Run -PreflightOnly
+$calibrateButton.Add_Click({
+    Start-Run -Calibrate
 })
 
 $refreshDevicesButton.Add_Click({
