@@ -391,18 +391,18 @@ function Invoke-DeviceShell {
         [switch]$AllowFailure
     )
 
-    $args = (Get-AdbDeviceArgs) + @("shell", $Command)
-    return Invoke-Adb -Arguments $args -AllowFailure:$AllowFailure
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", $Command)
+    return Invoke-Adb -Arguments $adbArgs -AllowFailure:$AllowFailure
 }
 
 function Get-DeviceTimeText {
-    $args = (Get-AdbDeviceArgs) + @("shell", "date", "+%H:%M:%S")
-    return (Invoke-Adb -Arguments $args).Trim()
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "date", "+%H:%M:%S")
+    return (Invoke-Adb -Arguments $adbArgs).Trim()
 }
 
 function Get-DeviceResolution {
-    $args = (Get-AdbDeviceArgs) + @("shell", "wm", "size")
-    $raw = Invoke-Adb -Arguments $args
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "wm", "size")
+    $raw = Invoke-Adb -Arguments $adbArgs
 
     foreach ($line in ($raw -split "`r?`n")) {
         if ($line -match "(\d+)x(\d+)") {
@@ -418,8 +418,8 @@ function Get-DeviceResolution {
 }
 
 function Get-DeviceDensityText {
-    $args = (Get-AdbDeviceArgs) + @("shell", "wm", "density")
-    $raw = Invoke-Adb -Arguments $args -AllowFailure
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "wm", "density")
+    $raw = Invoke-Adb -Arguments $adbArgs -AllowFailure
     $match = [regex]::Match($raw, "(\d+)")
     if ($match.Success) {
         return $match.Value
@@ -431,8 +431,8 @@ function Get-DeviceDensityText {
 function Get-DeviceProp {
     param([string]$Name)
 
-    $args = (Get-AdbDeviceArgs) + @("shell", "getprop", $Name)
-    return (Invoke-Adb -Arguments $args -AllowFailure).Trim()
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "getprop", $Name)
+    return (Invoke-Adb -Arguments $adbArgs -AllowFailure).Trim()
 }
 
 function Get-DeviceProfile {
@@ -879,7 +879,9 @@ function Get-CurrentDeviceTime {
 
 function Get-MillisecondsUntilTargetTime {
     $currentTime = Get-CurrentDeviceTime
-    return [int][Math]::Round(($TargetTime - $currentTime).TotalMilliseconds)
+    $ms = [Math]::Round(($TargetTime - $currentTime).TotalMilliseconds)
+    if ($ms -lt 0) { $ms += 86400000 }
+    return [int]$ms
 }
 
 function Get-ConfiguredDelayMs {
@@ -972,8 +974,8 @@ function Assert-QqMusicForeground {
 }
 
 function Assert-QqMusicInstalled {
-    $args = (Get-AdbDeviceArgs) + @("shell", "pm", "path", $QqMusicPackage)
-    $raw = Invoke-Adb -Arguments $args -AllowFailure
+    $adbArgs = (Get-AdbDeviceArgs) + @("shell", "pm", "path", $QqMusicPackage)
+    $raw = Invoke-Adb -Arguments $adbArgs -AllowFailure
     if ($raw -notmatch "^package:") {
         throw "QQ Music ($QqMusicPackage) is not installed on the selected device."
     }

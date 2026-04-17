@@ -475,6 +475,12 @@ function Update-CountdownDisplay {
     $targetDateTime = $now.Date.Add($targetTime)
     $remaining = $targetDateTime - $now
 
+    # 目标时间已过超过 1 秒，则视为明天的目标
+    if ($remaining.TotalSeconds -lt -1) {
+        $targetDateTime = $targetDateTime.AddDays(1)
+        $remaining = $targetDateTime - $now
+    }
+
     if ($remaining.TotalSeconds -le 0) {
         if ($script:CurrentProcess -and -not $script:CurrentProcess.HasExited) {
             $countdownLabel.Text = "Executing"
