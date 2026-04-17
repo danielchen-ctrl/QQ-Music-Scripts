@@ -17,7 +17,8 @@
     [int]$RechargeToServiceTapDelayMs = 0,
     [int]$ServiceToPopupTapDelayMs = 0,
     [int]$PreBurstSettleMs = 0,
-    [int]$RehearsalSafetyMarginMs = 80
+    [int]$RehearsalSafetyMarginMs = 80,
+    [string]$ExitMarkerPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -836,13 +837,10 @@ function Save-CalibrationProfile {
         [pscustomobject]$PopupPlusPoint,
         [pscustomobject]$PopupExchangePoint,
         [pscustomobject]$PopupMinusPoint,
-        [pscustomobject]$PopupCancelPoint,
-        [int]$MeasuredRechargeDelayMs,
-        [int]$MeasuredPopupDelayMs
+        [pscustomobject]$PopupCancelPoint
     )
 
     $path = Get-CalibrationPath
-    $safetyMarginMs = 80
 
     $payload = [ordered]@{
         DeviceId        = $script:DeviceId
@@ -857,8 +855,8 @@ function Save-CalibrationProfile {
             PopupCancel     = Convert-TapPointForStorage -Point $PopupCancelPoint
         }
         Delays          = [ordered]@{
-            RechargeToServiceTapDelayMs = [Math]::Max(100, $MeasuredRechargeDelayMs + $safetyMarginMs)
-            ServiceToPopupTapDelayMs    = [Math]::Max(100, $MeasuredPopupDelayMs + $safetyMarginMs)
+            RechargeToServiceTapDelayMs = $FastTiming.RechargeToServiceMs
+            ServiceToPopupTapDelayMs    = $FastTiming.ServiceToPopupMs
             PreBurstSettleMs            = $FastTiming.PreBurstSettleMs
         }
     }
@@ -2162,31 +2160,27 @@ function Run-CalibrateFlow {
     Write-Log ("RechargeCard: ({0},{1}) via {2}" -f `
         $rechargeExecutionPoint.X, $rechargeExecutionPoint.Y, $rechargeExecutionPoint.Source)
 
-    # Step 2: 点击 RechargeCard，等待服务页出现并测量延迟
+    # Step 2: 点击 RechargeCard，等待服务页出现
     Write-Log "正在点击乐币充值入口，等待服务页加载..."
-    $rechargeDelaySw = [System.Diagnostics.Stopwatch]::StartNew()
     Invoke-TapAction -ActionName "RechargeCard" -Point $rechargeExecutionPoint
 
     $servicePoint = Wait-ForTapPoint -ActionName "ServiceExchange" -TimeoutMs 4000 -PollMs 80 -AllowFallback
     if (-not $servicePoint) {
         throw "服务页未出现，请检查 QQ 音乐是否响应正常。"
     }
-    $measuredRechargeDelayMs = [int]$rechargeDelaySw.ElapsedMilliseconds
-    Write-Log ("ServiceExchange: ({0},{1}) via {2} — 延迟 {3} ms" -f `
-        $servicePoint.X, $servicePoint.Y, $servicePoint.Source, $measuredRechargeDelayMs)
+    Write-Log ("ServiceExchange: ({0},{1}) via {2}" -f `
+        $servicePoint.X, $servicePoint.Y, $servicePoint.Source)
 
-    # Step 3: 点击 ServiceExchange，等待弹框出现并测量延迟
+    # Step 3: 点击 ServiceExchange，等待弹框出现
     Write-Log "正在点击服务兑换，等待弹框出现..."
-    $popupDelaySw = [System.Diagnostics.Stopwatch]::StartNew()
     Invoke-TapAction -ActionName "ServiceExchange" -Point $servicePoint
 
     $popupExchangePoint = Wait-ForTapPoint -ActionName "PopupExchange" -TimeoutMs 4000 -PollMs 80 -AllowFallback
     if (-not $popupExchangePoint) {
         throw "兑换弹框未出现，ServiceExchange 坐标可能不准确。"
     }
-    $measuredPopupDelayMs = [int]$popupDelaySw.ElapsedMilliseconds
-    Write-Log ("PopupExchange: ({0},{1}) via {2} — 延迟 {3} ms" -f `
-        $popupExchangePoint.X, $popupExchangePoint.Y, $popupExchangePoint.Source, $measuredPopupDelayMs)
+    Write-Log ("PopupExchange: ({0},{1}) via {2}" -f `
+        $popupExchangePoint.X, $popupExchangePoint.Y, $popupExchangePoint.Source)
 
     # Step 4: 捕获弹框内所有按钮坐标
     Write-Log "正在捕获弹框内所有按钮坐标..."
@@ -2226,15 +2220,12 @@ function Run-CalibrateFlow {
         -PopupPlusPoint     $popupPlusPoint `
         -PopupExchangePoint $popupExchangePoint `
         -PopupMinusPoint    $popupMinusPoint `
-        -PopupCancelPoint   $popupCancelPoint `
-        -MeasuredRechargeDelayMs $measuredRechargeDelayMs `
-        -MeasuredPopupDelayMs    $measuredPopupDelayMs
+        -PopupCancelPoint   $popupCancelPoint
 
     Write-Log "=== 校准完成 ==="
-    Write-Log ("最优延迟: 充值->服务页 {0}ms，服务页->弹框 {1}ms（已加 80ms 安全余量）" -f `
-        ([Math]::Max(100, $measuredRechargeDelayMs + 80)), `
-        ([Math]::Max(100, $measuredPopupDelayMs + 80)))
-    Write-Log "校准数据已永久保存，后续所有执行将自动使用此设备的坐标与延迟。"
+    Write-Log ("延迟配置: 充值->服务页 {0}ms，服务页->弹框 {1}ms（使用设备默认值）" -f `
+        $FastTiming.RechargeToServiceMs, $FastTiming.ServiceToPopupMs)
+    Write-Log "校准数据已永久保存，后续所有执行将自动使用此设备的坐标。"
 }
 
 function Try-Prime-RehearsalCache {
@@ -2559,11 +2550,13 @@ if ($ListDevicesJson) {
 
 try {
     Run-ExchangeFlow
+    if ($ExitMarkerPath) { [System.IO.File]::WriteAllText($ExitMarkerPath, "0") }
     exit 0
 }
 catch {
     Save-RunDiagnostics -Reason "Script failure" -ErrorRecord $_
     Write-Error $_
+    if ($ExitMarkerPath) { [System.IO.File]::WriteAllText($ExitMarkerPath, "1") }
     exit 1
 }
 
